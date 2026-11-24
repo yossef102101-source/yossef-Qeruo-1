@@ -1,0 +1,10 @@
+{
+  "grade": "grade2",
+  "track": "general",
+  "subject": "python",
+  "total_levels": 42,
+  "solutions": {
+    "1": "print(\"Hello Qureo\")",
+    "2": "score = 100\nprint(score)"
+  }
+}

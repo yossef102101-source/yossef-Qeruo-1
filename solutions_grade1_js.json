@@ -1,0 +1,13 @@
+{
+  "grade": "grade1",
+  "track": "general",
+  "subject": "javascript",
+  "total_levels": 42,
+  "solutions": {
+    "1": "console.log(\"Hello Qureo\");",
+    "2": "let score = 100;\nconsole.log(score);",
+    "3": "let x = 5;\nlet y = 10;\nconsole.log(x + y);",
+    "4": "let name = \"Student\";\nconsole.log(\"Welcome \" + name);",
+    "5": "let isReady = true;\nif (isReady) {\n  console.log(\"Start\");\n}"
+  }
+}
