@@ -64,12 +64,11 @@ async def _call_log(cb, msg: str):
     else:
         cb(msg)
 
-async def _call_progress(cb, percent: int, status_msg: str, log_msg: str = None):
+async def _call_progress(cb, current_val: int, total_val: int, log_msg: str):
     if not cb:
         return
-    actual_log = log_msg if log_msg is not None else status_msg
-    # تمرير المعاملات بالترتيب الذي يتوقعه server.py: (status_text, percent, log_msg)
-    args = (str(status_msg), int(percent), str(actual_log))
+    # الترتيب الصحيح لـ server.py: (الخطوة الحالية int، الإجمالي int، رسالة السجل str)
+    args = (int(current_val), int(total_val), str(log_msg))
     if asyncio.iscoroutinefunction(cb):
         await cb(*args)
     else:
@@ -89,7 +88,7 @@ async def solve_student_task(
     actual_pass = password or student_password or kwargs.get("pass", "")
 
     await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
-    await _call_progress(progress_callback, 5, "جاري تهيئة المتصفح...", "جاري تهيئة المتصفح الخفي...")
+    await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -109,7 +108,7 @@ async def solve_student_task(
         page = await context.new_page()
 
         try:
-            await _call_progress(progress_callback, 10, "فتح بوابة كيريو...", "جاري فتح بوابة كيريو التعليمية...")
+            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو التعليمية...")
             await page.goto("[https://me-portal.qureo.education/](https://me-portal.qureo.education/)", wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
 
@@ -134,7 +133,7 @@ async def solve_student_task(
                     continue
 
             # الخطوة 2: العثور على حقول تسجيل الدخول وإدخال البيانات
-            await _call_progress(progress_callback, 15, "إدخال بيانات الطالب...", f"تسجيل الدخول بحساب الطالب: {student_code}...")
+            await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
 
             login_input = page.locator("input[type='text'], input[name*='id'], input[name*='login'], input[name*='user']").first
             pass_input = page.locator("input[type='password']").first
@@ -152,7 +151,7 @@ async def solve_student_task(
             if "portal.qureo.education" in page.url and await page.locator("input[type='password']").is_visible():
                 raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
 
-            await _call_progress(progress_callback, 25, "الدخول إلى المنهج...", "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
+            await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
             # الخطوة 3: الضغط على زر "ابدأ" (بدء التعلم) إذا ظهر
             start_selectors = [
@@ -220,7 +219,7 @@ async def solve_student_task(
                                     await choices_loc.nth(c_i).click()
                                     action_taken = True
                                     solved_count += 1
-                                    await _call_progress(progress_callback, current_progress, f"تم حل {solved_count} خطوة...", f"تمت الإجابة على السؤال ({solved_count})")
+                                    await _call_progress(progress_callback, current_progress, 100, f"تمت الإجابة على السؤال ({solved_count})")
                                     break
                             except Exception:
                                 pass
@@ -234,7 +233,7 @@ async def solve_student_task(
                         await code_area.fill(ai_code)
                         action_taken = True
                         solved_count += 1
-                        await _call_progress(progress_callback, current_progress, f"تم كتابة كود الدرس ({solved_count})...", f"تمت كتابة الكود بنجاح ({solved_count})")
+                        await _call_progress(progress_callback, current_progress, 100, f"تمت كتابة الكود بنجاح ({solved_count})")
 
                 for n_sel in next_btns:
                     try:
@@ -255,7 +254,7 @@ async def solve_student_task(
                     else:
                         break
 
-            await _call_progress(progress_callback, 100, f"اكتملت الجلسة! تم إنجاز {solved_count} خطوة بنجاح.", f"اكتمل الحل التلقائي بنجاح! إجمالي الخطوات المنجزة: {solved_count}")
+            await _call_progress(progress_callback, 100, 100, f"اكتمل الحل التلقائي بنجاح! إجمالي الخطوات المنجزة: {solved_count}")
             return {"status": "completed", "solved": solved_count}
 
         except Exception as e:
