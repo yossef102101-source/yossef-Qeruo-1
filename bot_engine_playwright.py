@@ -6,9 +6,8 @@ from playwright.async_api import async_playwright
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# تقسيم الروابط لمنع متصفح الموبايل من تشويهها عند النسخ
-COURSE_URL = "https://" + "me-tp.qureo.education/course/javascript_ar"
 PORTAL_URL = "https://" + "me-portal.qureo.education/"
+COURSE_URL = "https://" + "me-tp.qureo.education/course/javascript_ar"
 GEMINI_BASE_URL = "https://" + "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -110,50 +109,71 @@ async def solve_student_task(
         page = await context.new_page()
 
         try:
-            # 1. فتح رابط الكورس مباشرة (يحوّلك فوراً لصفحة تسجيل الدخول)
-            await _call_progress(progress_callback, 10, 100, "جاري فتح منصة كيريو...")
-            await page.goto(COURSE_URL, wait_until="domcontentloaded", timeout=60000)
+            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو...")
+            await page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(4)
 
-            # 2. إذا ظهرت شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟") -> اضغط على الزر الثاني مباشرة
-            if await page.locator("input").count() == 0:
-                await _call_log(log_callback, "ظهرت شاشة اختيار البوابة، جاري الضغط على الزر الثاني (تسجيل الدخول للتعلم)...")
-                # البحث عن الأزرار/الروابط الرئيسية في الصفحة والضغط على الزر الثاني (رقم 1 في الترتيب البرمجي)
-                action_buttons = page.locator("button, a.btn, a[role='button'], div[role='button'], main a, form a")
-                btn_count = await action_buttons.count()
-                if btn_count >= 2:
-                    await action_buttons.nth(1).click()
-                    await asyncio.sleep(4)
-                elif btn_count == 1:
-                    await action_buttons.nth(0).click()
+            current_url = page.url
+            page_title = await page.title()
+            await _call_log(log_callback, f"تم فتح الصفحة: {page_title} ({current_url})")
+
+            # البحث عن كل العناصر القابلة للنقر في الصفحة
+            clickables = page.locator("button:visible, a:visible, [role='button']:visible")
+            c_count = await clickables.count()
+            btn_texts = []
+            for i in range(min(c_count, 10)):
+                try:
+                    t = (await clickables.nth(i).inner_text()).strip().replace("\n", " ")
+                    if t:
+                        btn_texts.append(f"[{i}:{t[:25]}]")
+                except Exception:
+                    pass
+
+            if btn_texts:
+                await _call_log(log_callback, "الأزرار الظاهرة: " + " | ".join(btn_texts))
+
+            # إذا لم تظهر مربعات الإدخال بعد، نضغط على الزر الثاني (تسجيل الدخول للتعلم)
+            if await page.locator("input:visible").count() < 2:
+                clicked = False
+                for i in range(c_count):
+                    try:
+                        t = (await clickables.nth(i).inner_text()).strip()
+                        if "للتعلم" in t or "التعلم" in t or "Learning" in t:
+                            await _call_log(log_callback, f"الضغط على زر: {t[:30]}...")
+                            await clickables.nth(i).click()
+                            await asyncio.sleep(4)
+                            clicked = True
+                            break
+                    except Exception:
+                        pass
+
+                if not clicked and c_count >= 2:
+                    await _call_log(log_callback, "الضغط على الزر الثاني في الصفحة...")
+                    await clickables.nth(1).click()
                     await asyncio.sleep(4)
 
-            # 3. تسجيل الدخول بالحساب (المربع الأول للكود، والمربع الثاني لكلمة المرور، ثم الضغط على زر الدخول)
+            # التحقق من ظهور مربعات الإدخال الآن
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
-
-            # انتظار ظهور مربعات الإدخال في الصفحة
             all_inputs = page.locator("input:visible")
-            await all_inputs.first.wait_for(state="visible", timeout=25000)
+            if await all_inputs.count() < 2:
+                # طباعة جزء من نص الصفحة لمعرفة ماذا يظهر للسيرفر
+                body_txt = (await page.locator("body").inner_text()).strip().replace("\n", " ")[:180]
+                raise Exception(f"لم تظهر مربعات الدخول. الرابط: {page.url} | محتوى الصفحة: {body_txt}")
 
-            inputs_count = await all_inputs.count()
-            if inputs_count >= 2:
-                await all_inputs.nth(0).fill(str(student_code).strip())
-                await all_inputs.nth(1).fill(str(actual_pass).strip())
-            else:
-                raise Exception(f"لم يتم العثور على مربعي الدخول (العنوان الحالي: {page.url})")
+            await all_inputs.nth(0).fill(str(student_code).strip())
+            await all_inputs.nth(1).fill(str(actual_pass).strip())
 
             # الضغط على زر تسجيل الدخول
             login_btn = page.locator("button:visible, input[type='submit']:visible").first
             await login_btn.click()
             await asyncio.sleep(6)
 
-            # التأكد من تجاوز صفحة تسجيل الدخول
             if await page.locator("input[type='password']:visible").count() > 0:
                 raise Exception("بيانات الدخول غير صحيحة أو لم يتم قبولها من المنصة.")
 
             await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الضغط على زر ابدأ...")
 
-            # 4. الضغط على زر "ابدأ" (الزر البنفسجي في صفحة الترحيب)
+            # الضغط على زر "ابدأ"
             for _ in range(3):
                 start_btn = page.locator("button:has-text('ابدأ'), a:has-text('ابدأ'), button:has-text('Start')").first
                 if await start_btn.is_visible(timeout=3000):
@@ -163,7 +183,7 @@ async def solve_student_task(
                     break
                 await asyncio.sleep(2)
 
-            # 5. حل الدروس المتاحة تلقائياً
+            # حل الدروس المتاحة تلقائياً
             solved_count = 0
             max_steps = 120
 
