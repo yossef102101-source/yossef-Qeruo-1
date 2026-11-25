@@ -21,23 +21,55 @@ SOLUTIONS_FILES = [
 
 def build_proxy_config(raw_proxy: str):
     """
-    تحويل رابط البروكسي (مثل http://user:pass@ip:port أو http://ip:port) إلى إعدادات Playwright
+    يدعم جميع صيغ البروكسي تلقائياً دون أخطاء:
+    1) http://user:pass@ip:port
+    2) socks5://user:pass@ip:port
+    3) ip:port:user:pass
+    4) ip:port
     """
     if not raw_proxy:
         return None
-    if "://" not in raw_proxy:
-        raw_proxy = "http://" + raw_proxy
-    parsed = urlparse(raw_proxy)
-    if not parsed.hostname or not parsed.port:
+    raw = raw_proxy.strip().strip('"').strip("'")
+    if not raw or "ip:port" in raw.lower():
         return None
-    config = {
-        "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-    }
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+
+    try:
+        scheme = "http"
+        rest = raw
+        if "://" in raw:
+            scheme, rest = raw.split("://", 1)
+
+        # الصيغة القياسية: user:pass@host:port (نستخدم rsplit للتعامل مع @ داخل كلمة المرور)
+        if "@" in rest:
+            auth_part, host_part = rest.rsplit("@", 1)
+            if ":" not in host_part:
+                return None
+            host, port_str = host_part.rsplit(":", 1)
+            port = int(port_str.strip("/"))
+            config = {"server": f"{scheme}://{host}:{port}"}
+            if ":" in auth_part:
+                u, p = auth_part.split(":", 1)
+                config["username"] = u
+                config["password"] = p
+            return config
+
+        # الصيغة الشائعة بدون @: ip:port:user:pass أو ip:port
+        parts = rest.strip("/").split(":")
+        if len(parts) == 2:
+            host, port = parts[0], int(parts[1])
+            return {"server": f"{scheme}://{host}:{port}"}
+        elif len(parts) >= 4:
+            host, port = parts[0], int(parts[1])
+            username = parts[2]
+            password = ":".join(parts[3:])
+            return {
+                "server": f"{scheme}://{host}:{port}",
+                "username": username,
+                "password": password
+            }
+    except Exception as e:
+        print(f"Invalid proxy format ignored: {e}")
+    return None
 
 def load_local_solutions():
     db = {}
@@ -120,7 +152,7 @@ async def solve_student_task(
     if proxy_settings:
         await _call_log(log_callback, f"تم تفعيل الاتصال عبر البروكسي: {proxy_settings['server']}")
     else:
-        await _call_log(log_callback, "تنبيه: لم يتم ضبط PROXY_URL في متغيرات السيرفر (اتصال مباشر)...")
+        await _call_log(log_callback, "تنبيه: صيغة PROXY_URL غير صالحة أو فارغة (تأكد من كتابة IP ورقم المنفذ بشكل صحيح)...")
 
     await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
@@ -197,7 +229,7 @@ async def solve_student_task(
             all_inputs = page.locator("input:visible")
 
             if await all_inputs.count() < 2:
-                raise Exception("فشل تحميل حقول الدخول؛ تأكد من أن البروكسي يعمل وسريع.")
+                raise Exception("فشل تحميل حقول الدخول؛ تأكد من أن البروكسي مصري ويعمل.")
 
             await all_inputs.nth(0).fill(str(student_code).strip())
             await all_inputs.nth(1).fill(str(actual_pass).strip())
