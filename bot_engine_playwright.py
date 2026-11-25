@@ -1,19 +1,15 @@
 import os
 import json
-import time
 import asyncio
-from datetime import datetime
+import httpx
 from playwright.async_api import async_playwright
-import google.generativeai as genai
 
-# إعداد Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 SOLUTIONS_FILES = [
     "solutions_grade1_js.json",
-    "solutions_grade2_finance.json"
+    "solutions_grade2_finance.json",
+    "solutions_grade2_python.json"
 ]
 
 def load_local_solutions():
@@ -35,7 +31,6 @@ async def ask_gemini_for_answer(question_text: str, code_context: str = "", choi
     if not GEMINI_API_KEY:
         return ""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = (
             "أنت مساعد ذكي متخصص في حل أسئلة منصة كيريو (QUREO) للبرمجة بلغة JavaScript و HTML و CSS.\n"
             "أعطني الإجابة النهائية المباشرة والدقيقة فقط بدون أي شرح أو مقدمات أو علامات تنسيق Markdown.\n"
@@ -44,18 +39,26 @@ async def ask_gemini_for_answer(question_text: str, code_context: str = "", choi
         if code_context:
             prompt += f"\nالكود الحالي في المحرر:\n{code_context}\n"
         if choices:
-            prompt += f"\nالاختيارات المتاحة:\n" + "\n".join([f"- {c}" for c in choices]) + "\n"
+            prompt += "\nالاختيارات المتاحة:\n" + "\n".join([f"- {c}" for c in choices]) + "\n"
             prompt += "اختر النص الدقيق للإجابة الصحيحة من الاختيارات السابقة فقط."
 
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        return response.text.strip()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return text.strip().replace("```javascript", "").replace("```js", "").replace("```", "").strip()
     except Exception as e:
-        print(f"Gemini error: {e}")
-        return ""
+        print(f"Gemini HTTP error: {e}")
+    return ""
 
-async def run_qureo_solver(student_code: str, student_password: str, log_callback, progress_callback):
+async def solve_student_task(student_code: str, student_password: str, log_callback, progress_callback):
     """
-    تشغيل متصفح Playwright للدخول إلى بوابة كيريو وحل جميع الفصول المتاحة تلقائياً
+    الدالة الرئيسية التي يستدعيها server.py لتشغيل المتصفح الخفي وحل دروس كيريو تلقائياً
     """
     await log_callback("جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
     await progress_callback(5, "جاري تهيئة المتصفح...")
@@ -80,7 +83,7 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
         try:
             await log_callback("جاري فتح بوابة كيريو التعليمية...")
             await progress_callback(10, "فتح بوابة كيريو...")
-            await page.goto("https://me-portal.qureo.education/", wait_until="networkidle", timeout=60000)
+            await page.goto("[https://me-portal.qureo.education/](https://me-portal.qureo.education/)", wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
 
             # الخطوة 1: تخطي شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟")
@@ -120,14 +123,13 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
             await page.wait_for_load_state("networkidle", timeout=45000)
             await asyncio.sleep(3)
 
-            # التحقق من نجاح تسجيل الدخول
             if "portal.qureo.education" in page.url and await page.locator("input[type='password']").is_visible():
                 raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
 
             await log_callback("تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
             await progress_callback(25, "الدخول إلى المنهج...")
 
-            # الخطوة 3: الضغط على زر "ابدأ" (بدء التعلم) إذا ظهر في الصفحة الرئيسية للكورس
+            # الخطوة 3: الضغط على زر "ابدأ" (بدء التعلم) إذا ظهر
             start_selectors = [
                 "button:has-text('ابدأ')",
                 "a:has-text('ابدأ')",
@@ -146,34 +148,13 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                 except Exception:
                     continue
 
-            # الخطوة 4: البحث عن الدروس غير المكتملة وحلها
+            # الخطوة 4: حل الدروس المتاحة تلقائياً
             solved_count = 0
             max_steps = 120
 
             for step in range(max_steps):
                 current_progress = min(95, 25 + int((step / max_steps) * 70))
 
-                # البحث عن درس متاح (غير مقفل بقفل) أو زر متابعة
-                lesson_cards = page.locator("a[href*='lesson'], div[class*='lesson'], li[class*='lesson'], button:has-text('ابدأ'), button:has-text('التالي'), button:has-text('متابعة')")
-                count = await lesson_cards.count()
-
-                if count == 0:
-                    # محاولة فتح أول فصل غير مكتمل في القائمة الجانبية
-                    chapters = page.locator("div[class*='chapter'], li[class*='chapter']")
-                    ch_count = await chapters.count()
-                    clicked_chapter = False
-                    for i in range(ch_count):
-                        ch = chapters.nth(i)
-                        html = await ch.inner_html()
-                        if "lock" not in html.lower() and "قفل" not in html:
-                            await ch.click()
-                            await asyncio.sleep(2)
-                            clicked_chapter = True
-                            break
-                    if not clicked_chapter:
-                        break
-
-                # التفاعل مع شاشات الحوار والشرح (زر التالي / فهمت / حسناً)
                 next_btns = [
                     "button:has-text('التالي')",
                     "button:has-text('فهمت')",
@@ -186,7 +167,6 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                 ]
 
                 action_taken = False
-                # التحقق من وجود سؤال اختيار من متعدد أو حقل كتابة كود
                 choices_loc = page.locator("label[class*='choice'], div[class*='choice'], button[class*='option'], input[type='radio']")
                 choices_count = await choices_loc.count()
 
@@ -206,7 +186,7 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                             pass
 
                     if choices_texts:
-                        await log_callback(f"تحليل سؤال اختياري بالذكاء الاصطناعي...")
+                        await log_callback("تحليل سؤال اختياري بالذكاء الاصطناعي...")
                         ans = await ask_gemini_for_answer(q_text, choices=choices_texts)
                         for c_i in range(choices_count):
                             try:
@@ -220,7 +200,6 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                             except Exception:
                                 pass
 
-                # التحقق من وجود محرر كود (textarea أو monaco / ace editor)
                 code_area = page.locator("textarea").first
                 if not action_taken and q_text and await code_area.is_visible(timeout=1000):
                     current_code = await code_area.input_value()
@@ -232,7 +211,6 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                         solved_count += 1
                         await progress_callback(current_progress, f"تم كتابة كود الدرس ({solved_count})...")
 
-                # الضغط على زر المتابعة / الإرسال
                 for n_sel in next_btns:
                     try:
                         n_btn = page.locator(n_sel).first
@@ -245,7 +223,6 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
                         continue
 
                 if not action_taken:
-                    # محاولة فتح أول درس متاح في القائمة
                     avail_lessons = page.locator("div[class*='lesson']:not([class*='lock']), a[href*='lesson']")
                     if await avail_lessons.count() > 0:
                         await avail_lessons.first.click()
@@ -263,3 +240,6 @@ async def run_qureo_solver(student_code: str, student_password: str, log_callbac
             raise e
         finally:
             await browser.close()
+
+# اسم بديل للتوافق في حال تم استدعاؤه من أي ملف آخر
+run_qureo_solver = solve_student_task
