@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-from urllib.parse import urlparse
 import httpx
 from playwright.async_api import async_playwright
 
@@ -19,27 +18,18 @@ SOLUTIONS_FILES = [
     "solutions_grade2_python.json"
 ]
 
-def build_proxy_config(raw_proxy: str):
-    """
-    يدعم جميع صيغ البروكسي تلقائياً دون أخطاء:
-    1) http://user:pass@ip:port
-    2) socks5://user:pass@ip:port
-    3) ip:port:user:pass
-    4) ip:port
-    """
+def parse_single_proxy(raw_proxy: str):
     if not raw_proxy:
         return None
     raw = raw_proxy.strip().strip('"').strip("'")
     if not raw or "ip:port" in raw.lower():
         return None
-
     try:
         scheme = "http"
         rest = raw
         if "://" in raw:
             scheme, rest = raw.split("://", 1)
 
-        # الصيغة القياسية: user:pass@host:port (نستخدم rsplit للتعامل مع @ داخل كلمة المرور)
         if "@" in rest:
             auth_part, host_part = rest.rsplit("@", 1)
             if ":" not in host_part:
@@ -53,23 +43,31 @@ def build_proxy_config(raw_proxy: str):
                 config["password"] = p
             return config
 
-        # الصيغة الشائعة بدون @: ip:port:user:pass أو ip:port
         parts = rest.strip("/").split(":")
         if len(parts) == 2:
             host, port = parts[0], int(parts[1])
             return {"server": f"{scheme}://{host}:{port}"}
         elif len(parts) >= 4:
             host, port = parts[0], int(parts[1])
-            username = parts[2]
-            password = ":".join(parts[3:])
             return {
                 "server": f"{scheme}://{host}:{port}",
-                "username": username,
-                "password": password
+                "username": parts[2],
+                "password": ":".join(parts[3:])
             }
-    except Exception as e:
-        print(f"Invalid proxy format ignored: {e}")
+    except Exception:
+        pass
     return None
+
+def parse_proxy_list(raw_env: str):
+    """يدعم وضع بروكسي واحد أو عدة بروكسيات مفصولة بفاصلة (,)"""
+    if not raw_env:
+        return []
+    proxies = []
+    for item in raw_env.split(","):
+        cfg = parse_single_proxy(item)
+        if cfg:
+            proxies.append(cfg)
+    return proxies
 
 def load_local_solutions():
     db = {}
@@ -147,55 +145,76 @@ async def solve_student_task(
     **kwargs
 ):
     actual_pass = password or student_password or kwargs.get("pass", "")
-    proxy_settings = build_proxy_config(PROXY_URL)
+    proxy_candidates = parse_proxy_list(PROXY_URL)
 
-    if proxy_settings:
-        await _call_log(log_callback, f"تم تفعيل الاتصال عبر البروكسي: {proxy_settings['server']}")
+    if not proxy_candidates:
+        proxy_candidates = [None]
+        await _call_log(log_callback, "تنبيه: لا يوجد بروكسي مضبوط، جاري الاتصال المباشر...")
     else:
-        await _call_log(log_callback, "تنبيه: صيغة PROXY_URL غير صالحة أو فارغة (تأكد من كتابة IP ورقم المنفذ بشكل صحيح)...")
+        await _call_log(log_callback, f"تم العثور على ({len(proxy_candidates)}) بروكسي متاح للاتصال...")
 
     await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
-        launch_kwargs = {
-            "headless": True,
-            "args": [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1366,768"
-            ]
-        }
-        if proxy_settings:
-            launch_kwargs["proxy"] = proxy_settings
+        browser = None
+        context = None
+        page = None
+        connected = False
 
-        browser = await p.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(
-            viewport={"width": 1366, "height": 768},
-            locale="ar-EG",
-            timezone_id="Africa/Cairo",
-            user_agent=DEFAULT_UA,
-            ignore_https_errors=True
-        )
+        # تجربة البروكسيات المتاحة واحداً تلو الآخر حتى ينجح الاتصال
+        for idx, p_cfg in enumerate(proxy_candidates, start=1):
+            try:
+                if p_cfg:
+                    await _call_log(log_callback, f"محاولة الاتصال عبر البروكسي ({idx}/{len(proxy_candidates)}): {p_cfg['server']}...")
+                launch_kwargs = {
+                    "headless": True,
+                    "args": [
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled",
+                        "--window-size=1366,768"
+                    ]
+                }
+                if p_cfg:
+                    launch_kwargs["proxy"] = p_cfg
 
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {} };
-        """)
+                browser = await p.chromium.launch(**launch_kwargs)
+                context = await browser.new_context(
+                    viewport={"width": 1366, "height": 768},
+                    locale="ar-EG",
+                    timezone_id="Africa/Cairo",
+                    user_agent=DEFAULT_UA,
+                    ignore_https_errors=True
+                )
 
-        page = await context.new_page()
+                # حظر تحميل الصور والخطوط لتسريع التصفح عبر البروكسي المجاني
+                await context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,eot}", lambda route: route.abort())
+
+                await context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    window.chrome = { runtime: {} };
+                """)
+
+                page = await context.new_page()
+                await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو...")
+
+                # استخدام commit/domcontentloaded بدلاً من networkidle لتجنب التوقف بسبب بطء البروكسي
+                await page.goto(PORTAL_HOME_URL, wait_until="domcontentloaded", timeout=35000)
+                await page.wait_for_selector("button, a, input", timeout=25000)
+                connected = True
+                await _call_log(log_callback, "تم فتح بوابة كيريو بنجاح!")
+                break
+            except Exception as conn_err:
+                await _call_log(log_callback, f"تعذر الفتح عبر البروكسي ({idx}): {str(conn_err)[:70]}...")
+                if browser:
+                    await browser.close()
+                    browser = None
+
+        if not connected or not page:
+            raise Exception("فشل الاتصال عبر جميع البروكسيات المضافة؛ يرجى تحديث قائمة البروكسي في Railway.")
 
         try:
-            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو عبر البروكسي...")
-            await page.goto(PORTAL_HOME_URL, wait_until="networkidle", timeout=60000)
-
-            try:
-                await page.wait_for_selector("button, a, input", timeout=20000)
-            except Exception:
-                await page.goto(COURSE_JS_URL, wait_until="networkidle", timeout=60000)
-                await page.wait_for_selector("button, a, input", timeout=20000)
-
             await asyncio.sleep(2)
 
             # الخطوة 1: تخطي شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟") -> الضغط على الزر الثاني
@@ -210,8 +229,7 @@ async def solve_student_task(
                         if "للتعلم" in t or "التعلم" in t or "Learning" in t:
                             await _call_log(log_callback, "تم الضغط على زر (انتقل إلى تسجيل الدخول للتعلم)...")
                             await clickables.nth(i).click()
-                            await page.wait_for_load_state("networkidle", timeout=30000)
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(4)
                             clicked = True
                             break
                     except Exception:
@@ -220,8 +238,7 @@ async def solve_student_task(
                 if not clicked and c_count >= 2:
                     await _call_log(log_callback, "تم الضغط على الزر الثاني في البوابة...")
                     await clickables.nth(1).click()
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(4)
 
             # الخطوة 2: تسجيل الدخول بحساب الطالب
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
@@ -229,7 +246,7 @@ async def solve_student_task(
             all_inputs = page.locator("input:visible")
 
             if await all_inputs.count() < 2:
-                raise Exception("فشل تحميل حقول الدخول؛ تأكد من أن البروكسي مصري ويعمل.")
+                raise Exception("لم تظهر حقول الدخول؛ قد يكون البروكسي بطيئاً جداً.")
 
             await all_inputs.nth(0).fill(str(student_code).strip())
             await all_inputs.nth(1).fill(str(actual_pass).strip())
@@ -237,8 +254,7 @@ async def solve_student_task(
             submit_btn = page.locator("button[type='submit']:visible, button:has-text('تسجيل الدخول'):visible, button:visible").first
             await submit_btn.click()
 
-            await page.wait_for_load_state("networkidle", timeout=45000)
-            await asyncio.sleep(4)
+            await asyncio.sleep(6)
 
             if await page.locator("input[type='password']:visible").count() > 0:
                 raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
@@ -246,15 +262,14 @@ async def solve_student_task(
             await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
             # الخطوة 3: الضغط على زر "ابدأ"
-            for _ in range(4):
+            for _ in range(5):
                 start_btn = page.locator("button:has-text('ابدأ'), a:has-text('ابدأ'), button:has-text('Start')").first
                 if await start_btn.is_visible(timeout=2500):
                     await _call_log(log_callback, "تم الضغط على زر (ابدأ) لفتح قائمة الفصول...")
                     await start_btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(4)
                     break
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2)
 
             # الخطوة 4: حل الدروس المتاحة تلقائياً
             solved_count = 0
@@ -346,6 +361,7 @@ async def solve_student_task(
             await _call_log(log_callback, f"توقفت العملية: {err_msg}")
             raise e
         finally:
-            await browser.close()
+            if browser:
+                await browser.close()
 
 run_qureo_solver = solve_student_task
