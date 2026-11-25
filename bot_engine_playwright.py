@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import inspect
 import httpx
 from playwright.async_api import async_playwright
 
@@ -69,19 +68,8 @@ async def _call_progress(cb, percent: int, status_msg: str, log_msg: str = None)
     if not cb:
         return
     actual_log = log_msg if log_msg is not None else status_msg
-    try:
-        sig = inspect.signature(cb)
-        param_count = len(sig.parameters)
-    except Exception:
-        param_count = 3
-
-    if param_count >= 3:
-        args = (percent, status_msg, actual_log)
-    elif param_count == 2:
-        args = (percent, status_msg)
-    else:
-        args = (percent,)
-
+    # تمرير المعاملات بالترتيب الذي يتوقعه server.py: (status_text, percent, log_msg)
+    args = (str(status_msg), int(percent), str(actual_log))
     if asyncio.iscoroutinefunction(cb):
         await cb(*args)
     else:
