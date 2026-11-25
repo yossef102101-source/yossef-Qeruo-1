@@ -7,8 +7,8 @@ from playwright.async_api import async_playwright
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # تقسيم الروابط لمنع متصفح الموبايل من تشويهها عند النسخ
-PORTAL_LOGIN_URL = "https://" + "me-portal.qureo.education/login"
 PORTAL_HOME_URL = "https://" + "me-portal.qureo.education/"
+COURSE_JS_URL = "https://" + "me-tp.qureo.education/course/javascript_ar"
 GEMINI_BASE_URL = "https://" + "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="
 DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
@@ -34,11 +34,18 @@ def load_local_solutions():
 LOCAL_SOLUTIONS = load_local_solutions()
 
 async def ask_gemini_for_answer(question_text: str, code_context: str = "", choices: list = None) -> str:
+    # البحث أولاً في قاعدة الحلول المحلية السريعة
+    clean_q = question_text.strip()
+    for k, v in LOCAL_SOLUTIONS.items():
+        if k and (k in clean_q or clean_q in k):
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
     if not GEMINI_API_KEY:
         return ""
     try:
         prompt = (
-            "أنت مساعد ذكي متخصص في حل أسئلة منصة كيريو (QUREO) للبرمجة بلغة JavaScript و HTML و CSS.\n"
+            "أنت مساعد ذكي متخصص في حل أسئلة منصة كيريو (QUREO) للبرمجة بلغة JavaScript و HTML و CSS و Python.\n"
             "أعطني الإجابة النهائية المباشرة والدقيقة فقط بدون أي شرح أو مقدمات أو علامات تنسيق Markdown.\n"
             f"السؤال:\n{question_text}\n"
         )
@@ -57,7 +64,7 @@ async def ask_gemini_for_answer(question_text: str, code_context: str = "", choi
             if resp.status_code == 200:
                 data = resp.json()
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
-                return text.strip().replace("```javascript", "").replace("```js", "").replace("```", "").strip()
+                return text.strip().replace("```javascript", "").replace("```js", "").replace("```python", "").replace("```", "").strip()
     except Exception as e:
         print(f"Gemini HTTP error: {e}")
     return ""
@@ -89,7 +96,7 @@ async def solve_student_task(
 ):
     actual_pass = password or student_password or kwargs.get("pass", "")
 
-    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي وتفعيل وضع التخفي...")
+    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
     await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
@@ -107,14 +114,9 @@ async def solve_student_task(
             viewport={"width": 1366, "height": 768},
             locale="ar-EG",
             timezone_id="Africa/Cairo",
-            user_agent=DEFAULT_UA,
-            extra_http_headers={
-                "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-            }
+            user_agent=DEFAULT_UA
         )
 
-        # إخفاء بصمة WebDriver حتى لا يكتشف موقع كيريو أن المتصفح آلي
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
@@ -123,57 +125,82 @@ async def solve_student_task(
         page = await context.new_page()
 
         try:
-            await _call_progress(progress_callback, 10, 100, "جاري فتح صفحة تسجيل دخول التعلم مباشرة...")
-            resp = await page.goto(PORTAL_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-            status_code = resp.status if resp else 0
-            await asyncio.sleep(5)
+            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو وتحميل الواجهة...")
+            await page.goto(PORTAL_HOME_URL, wait_until="networkidle", timeout=60000)
 
-            # إذا أعطى مسار /login خطأ 404، نفتح الصفحة الرئيسية للبوابة
-            if status_code == 404 or len((await page.locator("body").inner_text()).strip()) == 0:
-                await _call_log(log_callback, f"حالة الاستجابة ({status_code})، جاري محاولة فتح البوابة الرئيسية...")
-                resp = await page.goto(PORTAL_HOME_URL, wait_until="domcontentloaded", timeout=60000)
-                status_code = resp.status if resp else 0
-                await asyncio.sleep(6)
+            # انتظار اكتمال بناء واجهة React/Vue (حتى يظهر زر أو حقل إدخال)
+            try:
+                await page.wait_for_selector("button, a, input", timeout=20000)
+            except Exception:
+                # محاولة ثانية عبر رابط الكورس الذي يعيد التوجيه للبوابة
+                await page.goto(COURSE_JS_URL, wait_until="networkidle", timeout=60000)
+                await page.wait_for_selector("button, a, input", timeout=20000)
 
-            # إذا لم تظهر حقول الإدخال وظهرت أزرار البوابة، نضغط على الزر الثاني
+            await asyncio.sleep(2)
+
+            # الخطوة 1: إذا ظهرت شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟") -> اضغط على الزر الثاني
             if await page.locator("input").count() < 2:
-                clickables = page.locator("button, a, [role='button']")
+                clickables = page.locator("button:visible, a:visible, [role='button']:visible")
                 c_count = await clickables.count()
-                if c_count >= 2:
-                    await _call_log(log_callback, "الضغط على الزر الثاني (تسجيل الدخول للتعلم)...")
-                    await clickables.nth(1).click()
-                    await asyncio.sleep(5)
+                clicked = False
 
+                for i in range(c_count):
+                    try:
+                        t = (await clickables.nth(i).inner_text()).strip()
+                        if "للتعلم" in t or "التعلم" in t or "Learning" in t:
+                            await _call_log(log_callback, "تم الضغط على زر (انتقل إلى تسجيل الدخول للتعلم)...")
+                            await clickables.nth(i).click()
+                            await page.wait_for_load_state("networkidle", timeout=30000)
+                            await asyncio.sleep(2)
+                            clicked = True
+                            break
+                    except Exception:
+                        pass
+
+                if not clicked and c_count >= 2:
+                    await _call_log(log_callback, "تم الضغط على الزر الثاني في البوابة...")
+                    await clickables.nth(1).click()
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(2)
+
+            # الخطوة 2: انتظار ظهور مربعي تسجيل الدخول وإدخال بيانات الطالب
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
+            await page.wait_for_selector("input", timeout=25000)
             all_inputs = page.locator("input:visible")
+
             if await all_inputs.count() < 2:
-                html_len = len(await page.content())
-                body_txt = (await page.locator("body").inner_text()).strip().replace("\n", " ")[:150]
-                raise Exception(f"حظر من خادم كيريو أو صفحة فارغة (HTTP {status_code} | HTML {html_len}B | النص: {body_txt})")
+                raw_html = (await page.content())[:350].replace("\n", " ")
+                raise Exception(f"لم يكتمل تحميل حقول الدخول. كود الصفحة: {raw_html}")
 
             await all_inputs.nth(0).fill(str(student_code).strip())
             await all_inputs.nth(1).fill(str(actual_pass).strip())
 
-            login_btn = page.locator("button:visible, input[type='submit']:visible").first
-            await login_btn.click()
-            await asyncio.sleep(6)
+            # الضغط على زر تسجيل الدخول
+            submit_btn = page.locator("button[type='submit']:visible, button:has-text('تسجيل الدخول'):visible, button:visible").first
+            await submit_btn.click()
+
+            await page.wait_for_load_state("networkidle", timeout=45000)
+            await asyncio.sleep(4)
 
             if await page.locator("input[type='password']:visible").count() > 0:
-                raise Exception("بيانات الدخول غير صحيحة أو لم يتم قبولها من المنصة.")
+                raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
 
-            await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الضغط على زر ابدأ...")
+            await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
-            for _ in range(3):
+            # الخطوة 3: الضغط على زر "ابدأ" في صفحة الترحيب
+            for _ in range(4):
                 start_btn = page.locator("button:has-text('ابدأ'), a:has-text('ابدأ'), button:has-text('Start')").first
-                if await start_btn.is_visible(timeout=3000):
-                    await _call_log(log_callback, "تم الضغط على زر (ابدأ) للدخول إلى قائمة الفصول...")
+                if await start_btn.is_visible(timeout=2500):
+                    await _call_log(log_callback, "تم الضغط على زر (ابدأ) لفتح قائمة الفصول...")
                     await start_btn.click()
-                    await asyncio.sleep(4)
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    await asyncio.sleep(3)
                     break
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
 
+            # الخطوة 4: حل الدروس المتاحة تلقائياً
             solved_count = 0
-            max_steps = 120
+            max_steps = 150
 
             for step in range(max_steps):
                 current_progress = min(95, 25 + int((step / max_steps) * 70))
