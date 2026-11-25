@@ -6,10 +6,11 @@ from playwright.async_api import async_playwright
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-PORTAL_URL = "https://" + "me-portal.qureo.education/"
-COURSE_URL = "https://" + "me-tp.qureo.education/course/javascript_ar"
+# تقسيم الروابط لمنع متصفح الموبايل من تشويهها عند النسخ
+PORTAL_LOGIN_URL = "https://" + "me-portal.qureo.education/login"
+PORTAL_HOME_URL = "https://" + "me-portal.qureo.education/"
 GEMINI_BASE_URL = "https://" + "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="
-DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 SOLUTIONS_FILES = [
     "solutions_grade1_js.json",
@@ -88,7 +89,7 @@ async def solve_student_task(
 ):
     actual_pass = password or student_password or kwargs.get("pass", "")
 
-    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
+    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي وتفعيل وضع التخفي...")
     await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
@@ -98,72 +99,61 @@ async def solve_student_task(
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu"
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1366,768"
             ]
         )
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1366, "height": 768},
             locale="ar-EG",
-            user_agent=DEFAULT_UA
+            timezone_id="Africa/Cairo",
+            user_agent=DEFAULT_UA,
+            extra_http_headers={
+                "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            }
         )
+
+        # إخفاء بصمة WebDriver حتى لا يكتشف موقع كيريو أن المتصفح آلي
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {} };
+        """)
+
         page = await context.new_page()
 
         try:
-            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو...")
-            await page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(4)
+            await _call_progress(progress_callback, 10, 100, "جاري فتح صفحة تسجيل دخول التعلم مباشرة...")
+            resp = await page.goto(PORTAL_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            status_code = resp.status if resp else 0
+            await asyncio.sleep(5)
 
-            current_url = page.url
-            page_title = await page.title()
-            await _call_log(log_callback, f"تم فتح الصفحة: {page_title} ({current_url})")
+            # إذا أعطى مسار /login خطأ 404، نفتح الصفحة الرئيسية للبوابة
+            if status_code == 404 or len((await page.locator("body").inner_text()).strip()) == 0:
+                await _call_log(log_callback, f"حالة الاستجابة ({status_code})، جاري محاولة فتح البوابة الرئيسية...")
+                resp = await page.goto(PORTAL_HOME_URL, wait_until="domcontentloaded", timeout=60000)
+                status_code = resp.status if resp else 0
+                await asyncio.sleep(6)
 
-            # البحث عن كل العناصر القابلة للنقر في الصفحة
-            clickables = page.locator("button:visible, a:visible, [role='button']:visible")
-            c_count = await clickables.count()
-            btn_texts = []
-            for i in range(min(c_count, 10)):
-                try:
-                    t = (await clickables.nth(i).inner_text()).strip().replace("\n", " ")
-                    if t:
-                        btn_texts.append(f"[{i}:{t[:25]}]")
-                except Exception:
-                    pass
-
-            if btn_texts:
-                await _call_log(log_callback, "الأزرار الظاهرة: " + " | ".join(btn_texts))
-
-            # إذا لم تظهر مربعات الإدخال بعد، نضغط على الزر الثاني (تسجيل الدخول للتعلم)
-            if await page.locator("input:visible").count() < 2:
-                clicked = False
-                for i in range(c_count):
-                    try:
-                        t = (await clickables.nth(i).inner_text()).strip()
-                        if "للتعلم" in t or "التعلم" in t or "Learning" in t:
-                            await _call_log(log_callback, f"الضغط على زر: {t[:30]}...")
-                            await clickables.nth(i).click()
-                            await asyncio.sleep(4)
-                            clicked = True
-                            break
-                    except Exception:
-                        pass
-
-                if not clicked and c_count >= 2:
-                    await _call_log(log_callback, "الضغط على الزر الثاني في الصفحة...")
+            # إذا لم تظهر حقول الإدخال وظهرت أزرار البوابة، نضغط على الزر الثاني
+            if await page.locator("input").count() < 2:
+                clickables = page.locator("button, a, [role='button']")
+                c_count = await clickables.count()
+                if c_count >= 2:
+                    await _call_log(log_callback, "الضغط على الزر الثاني (تسجيل الدخول للتعلم)...")
                     await clickables.nth(1).click()
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(5)
 
-            # التحقق من ظهور مربعات الإدخال الآن
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
             all_inputs = page.locator("input:visible")
             if await all_inputs.count() < 2:
-                # طباعة جزء من نص الصفحة لمعرفة ماذا يظهر للسيرفر
-                body_txt = (await page.locator("body").inner_text()).strip().replace("\n", " ")[:180]
-                raise Exception(f"لم تظهر مربعات الدخول. الرابط: {page.url} | محتوى الصفحة: {body_txt}")
+                html_len = len(await page.content())
+                body_txt = (await page.locator("body").inner_text()).strip().replace("\n", " ")[:150]
+                raise Exception(f"حظر من خادم كيريو أو صفحة فارغة (HTTP {status_code} | HTML {html_len}B | النص: {body_txt})")
 
             await all_inputs.nth(0).fill(str(student_code).strip())
             await all_inputs.nth(1).fill(str(actual_pass).strip())
 
-            # الضغط على زر تسجيل الدخول
             login_btn = page.locator("button:visible, input[type='submit']:visible").first
             await login_btn.click()
             await asyncio.sleep(6)
@@ -173,7 +163,6 @@ async def solve_student_task(
 
             await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الضغط على زر ابدأ...")
 
-            # الضغط على زر "ابدأ"
             for _ in range(3):
                 start_btn = page.locator("button:has-text('ابدأ'), a:has-text('ابدأ'), button:has-text('Start')").first
                 if await start_btn.is_visible(timeout=3000):
@@ -183,7 +172,6 @@ async def solve_student_task(
                     break
                 await asyncio.sleep(2)
 
-            # حل الدروس المتاحة تلقائياً
             solved_count = 0
             max_steps = 120
 
