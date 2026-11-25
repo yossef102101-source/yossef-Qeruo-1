@@ -6,6 +6,11 @@ from playwright.async_api import async_playwright
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# تقسيم الروابط لمنع المتصفح من تحويلها لصيغة Markdown عند النسخ واللصق
+PORTAL_URL = "https://" + "me-portal.qureo.education/"
+GEMINI_BASE_URL = "https://" + "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="
+DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 SOLUTIONS_FILES = [
     "solutions_grade1_js.json",
     "solutions_grade2_finance.json",
@@ -42,7 +47,7 @@ async def ask_gemini_for_answer(question_text: str, code_context: str = "", choi
             prompt += "\nالاختيارات المتاحة:\n" + "\n".join([f"- {c}" for c in choices]) + "\n"
             prompt += "اختر النص الدقيق للإجابة الصحيحة من الاختيارات السابقة فقط."
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = GEMINI_BASE_URL + GEMINI_API_KEY
         payload = {
             "contents": [{"parts": [{"text": prompt}]}]
         }
@@ -67,7 +72,6 @@ async def _call_log(cb, msg: str):
 async def _call_progress(cb, current_val: int, total_val: int, log_msg: str):
     if not cb:
         return
-    # الترتيب الصحيح لـ server.py: (الخطوة الحالية int، الإجمالي int، رسالة السجل str)
     args = (int(current_val), int(total_val), str(log_msg))
     if asyncio.iscoroutinefunction(cb):
         await cb(*args)
@@ -82,9 +86,6 @@ async def solve_student_task(
     progress_callback=None,
     **kwargs
 ):
-    """
-    الدالة الرئيسية التي يستدعيها server.py لتشغيل المتصفح الخفي وحل دروس كيريو تلقائياً
-    """
     actual_pass = password or student_password or kwargs.get("pass", "")
 
     await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
@@ -103,16 +104,16 @@ async def solve_student_task(
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             locale="ar-EG",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent=DEFAULT_UA
         )
         page = await context.new_page()
 
         try:
             await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو التعليمية...")
-            await page.goto("[https://me-portal.qureo.education/](https://me-portal.qureo.education/)", wait_until="networkidle", timeout=60000)
+            await page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
 
-            # الخطوة 1: تخطي شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟")
+            # الخطوة 1: شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟")
             portal_btn_selectors = [
                 "text=انتقل إلى تسجيل الدخول للتعلم",
                 "a:has-text('تسجيل الدخول للتعلم')",
@@ -123,7 +124,7 @@ async def solve_student_task(
             for sel in portal_btn_selectors:
                 try:
                     btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=2000):
+                    if await btn.is_visible(timeout=2500):
                         await _call_log(log_callback, "تم اختيار بوابة تسجيل دخول التعلم...")
                         await btn.click()
                         await page.wait_for_load_state("networkidle", timeout=30000)
@@ -132,7 +133,7 @@ async def solve_student_task(
                 except Exception:
                     continue
 
-            # الخطوة 2: العثور على حقول تسجيل الدخول وإدخال البيانات
+            # الخطوة 2: شاشة "تسجيل دخول التعلم" (معرف تسجيل الدخول + كلمة المرور)
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
 
             login_input = page.locator("input[type='text'], input[name*='id'], input[name*='login'], input[name*='user']").first
@@ -153,7 +154,7 @@ async def solve_student_task(
 
             await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
-            # الخطوة 3: الضغط على زر "ابدأ" (بدء التعلم) إذا ظهر
+            # الخطوة 3: شاشة الترحيب في me-tp.qureo.education (زر "ابدأ / بدء التعلم")
             start_selectors = [
                 "button:has-text('ابدأ')",
                 "a:has-text('ابدأ')",
@@ -163,7 +164,7 @@ async def solve_student_task(
             for sel in start_selectors:
                 try:
                     s_btn = page.locator(sel).first
-                    if await s_btn.is_visible(timeout=4000):
+                    if await s_btn.is_visible(timeout=5000):
                         await _call_log(log_callback, "الضغط على زر (ابدأ) لفتح قائمة الفصول...")
                         await s_btn.click()
                         await page.wait_for_load_state("networkidle", timeout=30000)
@@ -172,7 +173,7 @@ async def solve_student_task(
                 except Exception:
                     continue
 
-            # الخطوة 4: حل الدروس المتاحة تلقائياً
+            # الخطوة 4: حل الدروس المتاحة في قائمة الفصول تلقائياً
             solved_count = 0
             max_steps = 120
 
