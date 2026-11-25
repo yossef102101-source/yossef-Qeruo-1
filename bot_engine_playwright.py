@@ -1,12 +1,13 @@
 import os
 import json
 import asyncio
+from urllib.parse import urlparse
 import httpx
 from playwright.async_api import async_playwright
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+PROXY_URL = os.getenv("PROXY_URL", "").strip()
 
-# تقسيم الروابط لمنع متصفح الموبايل من تشويهها عند النسخ
 PORTAL_HOME_URL = "https://" + "me-portal.qureo.education/"
 COURSE_JS_URL = "https://" + "me-tp.qureo.education/course/javascript_ar"
 GEMINI_BASE_URL = "https://" + "generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="
@@ -17,6 +18,26 @@ SOLUTIONS_FILES = [
     "solutions_grade2_finance.json",
     "solutions_grade2_python.json"
 ]
+
+def build_proxy_config(raw_proxy: str):
+    """
+    تحويل رابط البروكسي (مثل http://user:pass@ip:port أو http://ip:port) إلى إعدادات Playwright
+    """
+    if not raw_proxy:
+        return None
+    if "://" not in raw_proxy:
+        raw_proxy = "http://" + raw_proxy
+    parsed = urlparse(raw_proxy)
+    if not parsed.hostname or not parsed.port:
+        return None
+    config = {
+        "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    }
+    if parsed.username:
+        config["username"] = parsed.username
+    if parsed.password:
+        config["password"] = parsed.password
+    return config
 
 def load_local_solutions():
     db = {}
@@ -34,7 +55,6 @@ def load_local_solutions():
 LOCAL_SOLUTIONS = load_local_solutions()
 
 async def ask_gemini_for_answer(question_text: str, code_context: str = "", choices: list = None) -> str:
-    # البحث أولاً في قاعدة الحلول المحلية السريعة
     clean_q = question_text.strip()
     for k, v in LOCAL_SOLUTIONS.items():
         if k and (k in clean_q or clean_q in k):
@@ -95,26 +115,36 @@ async def solve_student_task(
     **kwargs
 ):
     actual_pass = password or student_password or kwargs.get("pass", "")
+    proxy_settings = build_proxy_config(PROXY_URL)
 
-    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
+    if proxy_settings:
+        await _call_log(log_callback, f"تم تفعيل الاتصال عبر البروكسي: {proxy_settings['server']}")
+    else:
+        await _call_log(log_callback, "تنبيه: لم يتم ضبط PROXY_URL في متغيرات السيرفر (اتصال مباشر)...")
+
     await _call_progress(progress_callback, 5, 100, "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
+        launch_kwargs = {
+            "headless": True,
+            "args": [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
                 "--window-size=1366,768"
             ]
-        )
+        }
+        if proxy_settings:
+            launch_kwargs["proxy"] = proxy_settings
+
+        browser = await p.chromium.launch(**launch_kwargs)
         context = await browser.new_context(
             viewport={"width": 1366, "height": 768},
             locale="ar-EG",
             timezone_id="Africa/Cairo",
-            user_agent=DEFAULT_UA
+            user_agent=DEFAULT_UA,
+            ignore_https_errors=True
         )
 
         await context.add_init_script("""
@@ -125,20 +155,18 @@ async def solve_student_task(
         page = await context.new_page()
 
         try:
-            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو وتحميل الواجهة...")
+            await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو عبر البروكسي...")
             await page.goto(PORTAL_HOME_URL, wait_until="networkidle", timeout=60000)
 
-            # انتظار اكتمال بناء واجهة React/Vue (حتى يظهر زر أو حقل إدخال)
             try:
                 await page.wait_for_selector("button, a, input", timeout=20000)
             except Exception:
-                # محاولة ثانية عبر رابط الكورس الذي يعيد التوجيه للبوابة
                 await page.goto(COURSE_JS_URL, wait_until="networkidle", timeout=60000)
                 await page.wait_for_selector("button, a, input", timeout=20000)
 
             await asyncio.sleep(2)
 
-            # الخطوة 1: إذا ظهرت شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟") -> اضغط على الزر الثاني
+            # الخطوة 1: تخطي شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟") -> الضغط على الزر الثاني
             if await page.locator("input").count() < 2:
                 clickables = page.locator("button:visible, a:visible, [role='button']:visible")
                 c_count = await clickables.count()
@@ -163,19 +191,17 @@ async def solve_student_task(
                     await page.wait_for_load_state("networkidle", timeout=30000)
                     await asyncio.sleep(2)
 
-            # الخطوة 2: انتظار ظهور مربعي تسجيل الدخول وإدخال بيانات الطالب
+            # الخطوة 2: تسجيل الدخول بحساب الطالب
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
             await page.wait_for_selector("input", timeout=25000)
             all_inputs = page.locator("input:visible")
 
             if await all_inputs.count() < 2:
-                raw_html = (await page.content())[:350].replace("\n", " ")
-                raise Exception(f"لم يكتمل تحميل حقول الدخول. كود الصفحة: {raw_html}")
+                raise Exception("فشل تحميل حقول الدخول؛ تأكد من أن البروكسي يعمل وسريع.")
 
             await all_inputs.nth(0).fill(str(student_code).strip())
             await all_inputs.nth(1).fill(str(actual_pass).strip())
 
-            # الضغط على زر تسجيل الدخول
             submit_btn = page.locator("button[type='submit']:visible, button:has-text('تسجيل الدخول'):visible, button:visible").first
             await submit_btn.click()
 
@@ -187,7 +213,7 @@ async def solve_student_task(
 
             await _call_progress(progress_callback, 25, 100, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
-            # الخطوة 3: الضغط على زر "ابدأ" في صفحة الترحيب
+            # الخطوة 3: الضغط على زر "ابدأ"
             for _ in range(4):
                 start_btn = page.locator("button:has-text('ابدأ'), a:has-text('ابدأ'), button:has-text('Start')").first
                 if await start_btn.is_visible(timeout=2500):
