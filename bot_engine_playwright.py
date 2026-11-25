@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import inspect
 import httpx
 from playwright.async_api import async_playwright
 
@@ -56,9 +57,31 @@ async def ask_gemini_for_answer(question_text: str, code_context: str = "", choi
         print(f"Gemini HTTP error: {e}")
     return ""
 
-async def _call_cb(cb, *args):
+async def _call_log(cb, msg: str):
     if not cb:
         return
+    if asyncio.iscoroutinefunction(cb):
+        await cb(msg)
+    else:
+        cb(msg)
+
+async def _call_progress(cb, percent: int, status_msg: str, log_msg: str = None):
+    if not cb:
+        return
+    actual_log = log_msg if log_msg is not None else status_msg
+    try:
+        sig = inspect.signature(cb)
+        param_count = len(sig.parameters)
+    except Exception:
+        param_count = 3
+
+    if param_count >= 3:
+        args = (percent, status_msg, actual_log)
+    elif param_count == 2:
+        args = (percent, status_msg)
+    else:
+        args = (percent,)
+
     if asyncio.iscoroutinefunction(cb):
         await cb(*args)
     else:
@@ -77,8 +100,8 @@ async def solve_student_task(
     """
     actual_pass = password or student_password or kwargs.get("pass", "")
 
-    await _call_cb(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
-    await _call_cb(progress_callback, 5, "جاري تهيئة المتصفح...")
+    await _call_log(log_callback, "جاري تشغيل المتصفح الخفي والاتصال بالذكاء الاصطناعي...")
+    await _call_progress(progress_callback, 5, "جاري تهيئة المتصفح...", "جاري تهيئة المتصفح الخفي...")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -98,8 +121,7 @@ async def solve_student_task(
         page = await context.new_page()
 
         try:
-            await _call_cb(log_callback, "جاري فتح بوابة كيريو التعليمية...")
-            await _call_cb(progress_callback, 10, "فتح بوابة كيريو...")
+            await _call_progress(progress_callback, 10, "فتح بوابة كيريو...", "جاري فتح بوابة كيريو التعليمية...")
             await page.goto("[https://me-portal.qureo.education/](https://me-portal.qureo.education/)", wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
 
@@ -115,7 +137,7 @@ async def solve_student_task(
                 try:
                     btn = page.locator(sel).first
                     if await btn.is_visible(timeout=2000):
-                        await _call_cb(log_callback, "تم اختيار بوابة تسجيل دخول التعلم...")
+                        await _call_log(log_callback, "تم اختيار بوابة تسجيل دخول التعلم...")
                         await btn.click()
                         await page.wait_for_load_state("networkidle", timeout=30000)
                         await asyncio.sleep(2)
@@ -124,8 +146,7 @@ async def solve_student_task(
                     continue
 
             # الخطوة 2: العثور على حقول تسجيل الدخول وإدخال البيانات
-            await _call_cb(log_callback, f"تسجيل الدخول بحساب الطالب: {student_code}...")
-            await _call_cb(progress_callback, 15, "إدخال بيانات الطالب...")
+            await _call_progress(progress_callback, 15, "إدخال بيانات الطالب...", f"تسجيل الدخول بحساب الطالب: {student_code}...")
 
             login_input = page.locator("input[type='text'], input[name*='id'], input[name*='login'], input[name*='user']").first
             pass_input = page.locator("input[type='password']").first
@@ -143,8 +164,7 @@ async def solve_student_task(
             if "portal.qureo.education" in page.url and await page.locator("input[type='password']").is_visible():
                 raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
 
-            await _call_cb(log_callback, "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
-            await _call_cb(progress_callback, 25, "الدخول إلى المنهج...")
+            await _call_progress(progress_callback, 25, "الدخول إلى المنهج...", "تم تسجيل الدخول بنجاح! جاري الدخول إلى المنهج...")
 
             # الخطوة 3: الضغط على زر "ابدأ" (بدء التعلم) إذا ظهر
             start_selectors = [
@@ -157,7 +177,7 @@ async def solve_student_task(
                 try:
                     s_btn = page.locator(sel).first
                     if await s_btn.is_visible(timeout=4000):
-                        await _call_cb(log_callback, "الضغط على زر (ابدأ) لفتح قائمة الفصول...")
+                        await _call_log(log_callback, "الضغط على زر (ابدأ) لفتح قائمة الفصول...")
                         await s_btn.click()
                         await page.wait_for_load_state("networkidle", timeout=30000)
                         await asyncio.sleep(3)
@@ -203,7 +223,7 @@ async def solve_student_task(
                             pass
 
                     if choices_texts:
-                        await _call_cb(log_callback, "تحليل سؤال اختياري بالذكاء الاصطناعي...")
+                        await _call_log(log_callback, "تحليل سؤال اختياري بالذكاء الاصطناعي...")
                         ans = await ask_gemini_for_answer(q_text, choices=choices_texts)
                         for c_i in range(choices_count):
                             try:
@@ -212,7 +232,7 @@ async def solve_student_task(
                                     await choices_loc.nth(c_i).click()
                                     action_taken = True
                                     solved_count += 1
-                                    await _call_cb(progress_callback, current_progress, f"تم حل {solved_count} خطوة...")
+                                    await _call_progress(progress_callback, current_progress, f"تم حل {solved_count} خطوة...", f"تمت الإجابة على السؤال ({solved_count})")
                                     break
                             except Exception:
                                 pass
@@ -220,13 +240,13 @@ async def solve_student_task(
                 code_area = page.locator("textarea").first
                 if not action_taken and q_text and await code_area.is_visible(timeout=1000):
                     current_code = await code_area.input_value()
-                    await _call_cb(log_callback, "توليد الكود البرمجي المطلوب بالذكاء الاصطناعي...")
+                    await _call_log(log_callback, "توليد الكود البرمجي المطلوب بالذكاء الاصطناعي...")
                     ai_code = await ask_gemini_for_answer(q_text, code_context=current_code)
                     if ai_code:
                         await code_area.fill(ai_code)
                         action_taken = True
                         solved_count += 1
-                        await _call_cb(progress_callback, current_progress, f"تم كتابة كود الدرس ({solved_count})...")
+                        await _call_progress(progress_callback, current_progress, f"تم كتابة كود الدرس ({solved_count})...", f"تمت كتابة الكود بنجاح ({solved_count})")
 
                 for n_sel in next_btns:
                     try:
@@ -247,13 +267,12 @@ async def solve_student_task(
                     else:
                         break
 
-            await _call_cb(progress_callback, 100, f"اكتملت الجلسة! تم إنجاز {solved_count} خطوة بنجاح.")
-            await _call_cb(log_callback, f"اكتمل الحل التلقائي بنجاح! إجمالي الخطوات المنجزة: {solved_count}")
+            await _call_progress(progress_callback, 100, f"اكتملت الجلسة! تم إنجاز {solved_count} خطوة بنجاح.", f"اكتمل الحل التلقائي بنجاح! إجمالي الخطوات المنجزة: {solved_count}")
             return {"status": "completed", "solved": solved_count}
 
         except Exception as e:
             err_msg = str(e)
-            await _call_cb(log_callback, f"توقفت العملية: {err_msg}")
+            await _call_log(log_callback, f"توقفت العملية: {err_msg}")
             raise e
         finally:
             await browser.close()
