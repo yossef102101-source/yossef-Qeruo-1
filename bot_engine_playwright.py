@@ -110,44 +110,65 @@ async def solve_student_task(
 
         try:
             await _call_progress(progress_callback, 10, 100, "جاري فتح بوابة كيريو التعليمية...")
-            await page.goto(PORTAL_URL, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(2)
+            await page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3)
 
-            # الخطوة 1: شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟")
+            # الخطوة 1: تخطي شاشة اختيار البوابة ("إلى أين ترغب بالذهاب؟")
+            clicked_portal = False
             portal_btn_selectors = [
-                "text=انتقل إلى تسجيل الدخول للتعلم",
                 "a:has-text('تسجيل الدخول للتعلم')",
                 "button:has-text('تسجيل الدخول للتعلم')",
-                "a[href*='login']",
-                "text=Learning Login"
+                "a:has-text('للتعلم')",
+                "button:has-text('للتعلم')",
+                "a:has-text('Learning')",
+                "button:has-text('Learning')",
+                "a[href*='login']"
             ]
             for sel in portal_btn_selectors:
                 try:
                     btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=2500):
+                    if await btn.is_visible(timeout=1500):
                         await _call_log(log_callback, "تم اختيار بوابة تسجيل دخول التعلم...")
                         await btn.click()
-                        await page.wait_for_load_state("networkidle", timeout=30000)
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(3)
+                        clicked_portal = True
                         break
                 except Exception:
                     continue
 
-            # الخطوة 2: شاشة "تسجيل دخول التعلم" (معرف تسجيل الدخول + كلمة المرور)
+            # خطة بديلة: إذا لم يطابق النص، اضغط على ثاني زر/رابط رئيسي في منتصف الصفحة
+            if not clicked_portal and await page.locator("input[type='password']").count() == 0:
+                try:
+                    btns = page.locator("main a, main button, form a, form button, div a, div button")
+                    cnt = await btns.count()
+                    for i in range(cnt):
+                        txt = (await btns.nth(i).inner_text()).strip()
+                        if "للتعلم" in txt or "التعلم" in txt or "Learning" in txt:
+                            await _call_log(log_callback, "الانتقال إلى صفحة إدخال بيانات الطالب...")
+                            await btns.nth(i).click()
+                            await asyncio.sleep(3)
+                            clicked_portal = True
+                            break
+                except Exception:
+                    pass
+
+            # الخطوة 2: العثور على حقول تسجيل الدخول وإدخال البيانات
             await _call_progress(progress_callback, 15, 100, f"تسجيل الدخول بحساب الطالب: {student_code}...")
 
-            login_input = page.locator("input[type='text'], input[name*='id'], input[name*='login'], input[name*='user']").first
             pass_input = page.locator("input[type='password']").first
+            await pass_input.wait_for(state="visible", timeout=25000)
 
-            await login_input.wait_for(state="visible", timeout=20000)
+            # التقاط حقل معرف تسجيل الدخول (أي حقل إدخال مرئي يسبق حقل كلمة المرور)
+            login_input = page.locator("input:not([type='password']):not([type='hidden']):not([type='checkbox']):not([type='submit'])").first
+            await login_input.wait_for(state="visible", timeout=10000)
+
             await login_input.fill(str(student_code).strip())
             await pass_input.fill(str(actual_pass).strip())
 
-            submit_btn = page.locator("button[type='submit'], button:has-text('تسجيل الدخول'), input[type='submit']").first
+            submit_btn = page.locator("button[type='submit'], button:has-text('تسجيل الدخول'), input[type='submit'], button").last
             await submit_btn.click()
 
-            await page.wait_for_load_state("networkidle", timeout=45000)
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
 
             if "portal.qureo.education" in page.url and await page.locator("input[type='password']").is_visible():
                 raise Exception("بيانات الدخول غير صحيحة (تأكد من الكود وكلمة المرور).")
@@ -167,8 +188,7 @@ async def solve_student_task(
                     if await s_btn.is_visible(timeout=5000):
                         await _call_log(log_callback, "الضغط على زر (ابدأ) لفتح قائمة الفصول...")
                         await s_btn.click()
-                        await page.wait_for_load_state("networkidle", timeout=30000)
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(4)
                         break
                 except Exception:
                     continue
